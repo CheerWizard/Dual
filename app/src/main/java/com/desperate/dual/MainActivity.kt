@@ -3,8 +3,6 @@ package com.desperate.dual
 import android.Manifest
 import android.os.Bundle
 import android.util.Log
-import android.view.*
-import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -23,25 +21,8 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
 
-    private val cameraListAdapter = CameraListAdapter(object : CameraListItemListener {
+    private val cameraListAdapter =  CameraListAdapter(object : CameraListItemListener {
         override fun onClicked(camera: Camera) {
-            NativeCamera.close()
-            NativeCamera.stopPreview()
-
-            val isOpened = NativeCamera.open(camera.id)
-            val message = if (isOpened) "opened!" else "failed to open!"
-            Toast.makeText(
-                this@MainActivity,
-                "Camera has been $message",
-                Toast.LENGTH_SHORT
-            ).show()
-
-            if (surfaceReady) {
-                NativeCamera.startPreview(binding.cameraSurfaceView.holder.surface)
-                Log.w(TAG, "Starting preview of $camera")
-            } else {
-                Log.w(TAG, "Unable to start preview of $camera")
-            }
         }
     })
 
@@ -57,8 +38,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-    private var surfaceReady = false
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -72,40 +51,8 @@ class MainActivity : AppCompatActivity() {
     private fun initView() {
         binding.apply {
             refresh.setOnClickListener { onRefreshBtnPressed() }
-
-            cameraListView.layoutManager = LinearLayoutManager(
-                applicationContext,
-                LinearLayoutManager.HORIZONTAL,
-                false
-            )
             cameraListView.adapter = cameraListAdapter
-
-            cameraSurfaceView.holder.addCallback(object : SurfaceHolder.Callback {
-                override fun surfaceCreated(holder: SurfaceHolder) {
-                    Log.v(TAG, "surfaceCreated()")
-                    surfaceReady = true
-                    if (cameraListAdapter.isNotEmpty()) {
-                        NativeCamera.open(cameraListAdapter.first().id)
-                        NativeCamera.startPreview(holder.surface)
-                    }
-                }
-
-                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                    Log.v(TAG, "surfaceDestroyed()")
-                    surfaceReady = false
-                    NativeCamera.close()
-                    NativeCamera.stopPreview()
-                }
-
-                override fun surfaceChanged(
-                    holder: SurfaceHolder,
-                    format: Int,
-                    width: Int,
-                    height: Int
-                ) {
-                    Log.v(TAG, "surfaceChanged(format=$format w=$width, h=$height)")
-                }
-            })
+            cameraListView.layoutManager = LinearLayoutManager(applicationContext, LinearLayoutManager.VERTICAL, false)
         }
     }
 

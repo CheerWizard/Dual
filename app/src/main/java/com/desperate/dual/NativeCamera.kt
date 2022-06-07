@@ -14,9 +14,9 @@ object NativeCamera {
     external fun getLensName(lensId: Int): String
 
     external fun open(cameraId: String): Boolean
-    external fun close(): Boolean
+    external fun close(cameraId: String): Boolean
 
-    external fun startPreview(surface: Surface)
-    external fun stopPreview()
+    external fun startPreview(surface: Surface, cameraId: String)
+    external fun stopPreview(cameraId: String)
 
 }
