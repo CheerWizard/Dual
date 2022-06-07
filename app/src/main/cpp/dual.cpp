@@ -14,17 +14,27 @@
 #include <cassert>
 #include <pthread.h>
 #include <mutex>
+#include <unordered_map>
+#include <sstream>
 
-static const char* activeCameraId = nullptr;
-static ANativeWindow* nativeWindow = nullptr;
+struct Camera {
+    u32 id = 0;
+    ANativeWindow* nativeWindow = nullptr;
+    ACameraDevice* device = nullptr;
+    ACaptureRequest* captureRequest = nullptr;
+    ACameraOutputTarget* outputTarget = nullptr;
+    ACaptureSessionOutput* sessionOutput = nullptr;
+    ACaptureSessionOutputContainer* sessionOutputContainer = nullptr;
+    ACameraCaptureSession* captureSession = nullptr;
+
+    Camera() = default;
+    Camera(u32 id) : id(id) {}
+};
+
 static ACameraManager* cameraManager = nullptr;
 static ACameraIdList* cameraIdList = nullptr;
-static ACameraDevice* cameraDevice = nullptr;
-static ACaptureRequest* captureRequest = nullptr;
-static ACameraOutputTarget* cameraOutputTarget = nullptr;
-static ACaptureSessionOutput* sessionOutput = nullptr;
-static ACaptureSessionOutputContainer* captureSessionOutputContainer = nullptr;
-static ACameraCaptureSession* captureSession = nullptr;
+
+static std::unordered_map<u32, Camera> cameras;
 
 static ACameraDevice_StateCallbacks deviceStateCallbacks;
 static ACameraCaptureSession_stateCallbacks captureSessionStateCallbacks;
@@ -49,85 +59,113 @@ static void onCaptureSessionClosed(void *context, ACameraCaptureSession *session
     DUAL_INFO("Session is closed. %p\n", session);
 }
 
-static camera_status_t openCamera(const char* cameraId) {
+template<typename TO>
+static TO convert(const char* from) {
+    std::stringstream ss;
+    ss << from;
+    TO to;
+    ss >> to;
+    return to;
+}
+
+static void createCameras(const char** cameraIds, u32 cameraCount) {
+    DUAL_INFO("createCameras()");
+    for (u32 i = 0; i < cameraCount; i++) {
+        auto id = convert<u32>(cameraIds[i]);
+        cameras.insert(std::pair<u32, Camera>(id, Camera(id)));
+        DUAL_INFO("Added new camera id=%u", id);
+    }
+}
+
+static void createCallbacks() {
     deviceStateCallbacks.onDisconnected = onCameraDeviceDisconnected;
     deviceStateCallbacks.onError = onCameraDeviceError;
-
-    if (cameraDevice) {
-        DUAL_ERR("Cannot open camera before closing previously open one");
-        return ACAMERA_ERROR_INVALID_PARAMETER;
-    }
-
-    activeCameraId = cameraId;
-    return ACameraManager_openCamera(
-            cameraManager, cameraId,
-            &deviceStateCallbacks, &cameraDevice
-    );
-}
-
-static camera_status_t closeCamera() {
-    camera_status_t status = ACameraDevice_close(cameraDevice);
-    cameraDevice = nullptr;
-    return status;
-}
-
-static void openCaptureSession(ACameraDevice_request_template templateId, jobject surface) {
-    camera_status_t errorStatus = ACameraDevice_createCaptureRequest(
-            cameraDevice,
-            templateId,
-            &captureRequest
-    );
-
-    if (errorStatus != ACAMERA_OK) {
-        DUAL_ERR("Failed to create capture request (id: %s)\n", activeCameraId);
-    }
-
-    ACaptureSessionOutputContainer_create(&captureSessionOutputContainer);
-
     captureSessionStateCallbacks.onReady = onCaptureSessionReady;
     captureSessionStateCallbacks.onActive = onCaptureSessionActive;
     captureSessionStateCallbacks.onClosed = onCaptureSessionClosed;
+}
+
+static camera_status_t openCamera(const char* cameraId) {
+    Camera& camera = cameras.at(convert<u32>(cameraId));
+    auto status = ACameraManager_openCamera(
+            cameraManager, cameraId,
+            &deviceStateCallbacks, &camera.device
+    );
+    DUAL_INFO("openCamera(): cameraId=%s camera.device=%p status=%u", cameraId, camera.device, status);
+    return status;
+}
+
+static camera_status_t closeCamera(u32 cameraId) {
+    Camera& camera = cameras.at(cameraId);
+    camera_status_t status = ACameraDevice_close(camera.device);
+    camera.device = nullptr;
+    return status;
+}
+
+static camera_status_t closeCamera(const char* cameraId) {
+    return closeCamera(convert<u32>(cameraId));
+}
+
+static void releaseCameras() {
+    for (auto camera : cameras) {
+        closeCamera(camera.first);
+    }
+    cameras.clear();
+}
+
+static void openCaptureSession(ACameraDevice_request_template templateId, jobject surface, Camera& camera) {
+    DUAL_INFO("openCaptureSession(): camera.device=%p", camera.device);
+
+    camera_status_t errorStatus = ACameraDevice_createCaptureRequest(
+            camera.device,
+            templateId,
+            &camera.captureRequest
+    );
+
+    if (errorStatus != ACAMERA_OK) {
+        DUAL_ERR("Failed to create capture request (id: %u)\n", camera.id);
+    }
+
+    ACaptureSessionOutputContainer_create(&camera.sessionOutputContainer);
 
     DUAL_INFO("Surface is prepared in %p.\n", surface);
 
-    ACameraOutputTarget_create(nativeWindow, &cameraOutputTarget);
-    ACaptureRequest_addTarget(captureRequest, cameraOutputTarget);
+    ACameraOutputTarget_create(camera.nativeWindow, &camera.outputTarget);
+    ACaptureRequest_addTarget(camera.captureRequest, camera.outputTarget);
 
-    ACaptureSessionOutput_create(nativeWindow, &sessionOutput);
-    ACaptureSessionOutputContainer_add(captureSessionOutputContainer, sessionOutput);
+    ACaptureSessionOutput_create(camera.nativeWindow, &camera.sessionOutput);
+    ACaptureSessionOutputContainer_add(camera.sessionOutputContainer, camera.sessionOutput);
 
     ACameraDevice_createCaptureSession(
-            cameraDevice, captureSessionOutputContainer,
-            &captureSessionStateCallbacks, &captureSession
+            camera.device, camera.sessionOutputContainer,
+            &captureSessionStateCallbacks, &camera.captureSession
     );
 
     ACameraCaptureSession_setRepeatingRequest(
-            captureSession, nullptr, 1,
-            &captureRequest, nullptr
+            camera.captureSession, nullptr, 1,
+            &camera.captureRequest, nullptr
     );
 }
 
-static void closeCaptureSession() {
-    camera_status_t camera_status = ACAMERA_OK;
-
-    if (captureRequest) {
-        ACaptureRequest_free(captureRequest);
-        captureRequest = nullptr;
+static void closeCaptureSession(Camera& camera) {
+    if (camera.captureRequest) {
+        ACaptureRequest_free(camera.captureRequest);
+        camera.captureRequest = nullptr;
     }
 
-    if (cameraOutputTarget) {
-        ACameraOutputTarget_free(cameraOutputTarget);
-        cameraOutputTarget = nullptr;
+    if (camera.outputTarget) {
+        ACameraOutputTarget_free(camera.outputTarget);
+        camera.outputTarget = nullptr;
     }
 
-    if (sessionOutput) {
-        ACaptureSessionOutput_free(sessionOutput);
-        sessionOutput = nullptr;
+    if (camera.sessionOutput) {
+        ACaptureSessionOutput_free(camera.sessionOutput);
+        camera.sessionOutput = nullptr;
     }
 
-    if (captureSessionOutputContainer) {
-        ACaptureSessionOutputContainer_free(captureSessionOutputContainer);
-        captureSessionOutputContainer = nullptr;
+    if (camera.sessionOutputContainer) {
+        ACaptureSessionOutputContainer_free(camera.sessionOutputContainer);
+        camera.sessionOutputContainer = nullptr;
     }
 
     DUAL_INFO("Capture session closed!\n");
@@ -137,11 +175,13 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_com_desperate_dual_Dual_init(JNIEnv *env, jobject thiz) {
     cameraManager = ACameraManager_create();
+    createCallbacks();
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_desperate_dual_Dual_release(JNIEnv *env, jobject thiz) {
+    releaseCameras();
     if (cameraManager) {
         ACameraManager_delete(cameraManager);
         cameraManager = nullptr;
@@ -151,7 +191,7 @@ Java_com_desperate_dual_Dual_release(JNIEnv *env, jobject thiz) {
 extern "C"
 JNIEXPORT jobjectArray JNICALL
 Java_com_desperate_dual_NativeCamera_getIdList(JNIEnv *env, jobject thiz) {
-    jobjectArray strArray;
+    jobjectArray ids;
 
     camera_status_t status = ACameraManager_getCameraIdList(cameraManager, &cameraIdList);
 
@@ -166,7 +206,7 @@ Java_com_desperate_dual_NativeCamera_getIdList(JNIEnv *env, jobject thiz) {
     }
 
     DUAL_INFO("Number of cameras: %d", cameraIdList->numCameras);
-    strArray = (jobjectArray) env->NewObjectArray(
+    ids = (jobjectArray) env->NewObjectArray(
             cameraIdList->numCameras,
             env->FindClass("java/lang/String"),
             env->NewStringUTF("")
@@ -174,12 +214,14 @@ Java_com_desperate_dual_NativeCamera_getIdList(JNIEnv *env, jobject thiz) {
 
     for (u32 i = 0; i < cameraIdList->numCameras; i++) {
         DUAL_INFO("Camera ID: %s", cameraIdList->cameraIds[i]);
-        env->SetObjectArrayElement(strArray, i, env->NewStringUTF(cameraIdList->cameraIds[i]));
+        env->SetObjectArrayElement(ids, i, env->NewStringUTF(cameraIdList->cameraIds[i]));
     }
 
+    releaseCameras();
+    createCameras(cameraIdList->cameraIds, cameraIdList->numCameras);
     ACameraManager_deleteCameraIdList(cameraIdList);
 
-    return strArray;
+    return ids;
 }
 
 extern "C"
@@ -241,29 +283,32 @@ Java_com_desperate_dual_NativeCamera_getLensName(JNIEnv *env, jobject thiz, jint
 
 extern "C"
 JNIEXPORT jboolean JNICALL
-Java_com_desperate_dual_NativeCamera_open(JNIEnv *env, jobject thiz, jstring camera_id) {
-    return openCamera(env->GetStringUTFChars(camera_id, nullptr)) == ACAMERA_OK;
+Java_com_desperate_dual_NativeCamera_open(JNIEnv *env, jobject thiz, jstring id) {
+    return openCamera(env->GetStringUTFChars(id, nullptr)) == ACAMERA_OK;
 }
 
 extern "C"
 JNIEXPORT jboolean JNICALL
-Java_com_desperate_dual_NativeCamera_close(JNIEnv *env, jobject thiz) {
-    return closeCamera() == ACAMERA_OK;
+Java_com_desperate_dual_NativeCamera_close(JNIEnv *env, jobject thiz, jstring id) {
+    return closeCamera(env->GetStringUTFChars(id, nullptr)) == ACAMERA_OK;
 }
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_desperate_dual_NativeCamera_startPreview(JNIEnv *env, jobject thiz, jobject surface) {
-    nativeWindow = ANativeWindow_fromSurface(env, surface);
-    openCaptureSession(TEMPLATE_PREVIEW, surface);
+Java_com_desperate_dual_NativeCamera_startPreview(JNIEnv *env, jobject thiz, jobject surface, jstring id) {
+    Camera& camera = cameras.at(convert<u32>(env->GetStringUTFChars(id, nullptr)));
+    camera.nativeWindow = ANativeWindow_fromSurface(env, surface);
+    openCaptureSession(TEMPLATE_PREVIEW, surface, camera);
 }
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_desperate_dual_NativeCamera_stopPreview(JNIEnv *env, jobject thiz) {
-    closeCaptureSession();
-    if (nativeWindow) {
-        ANativeWindow_release(nativeWindow);
-        nativeWindow = nullptr;
+Java_com_desperate_dual_NativeCamera_stopPreview(JNIEnv *env, jobject thiz, jstring id) {
+    Camera& camera = cameras.at(convert<u32>(env->GetStringUTFChars(id, nullptr)));
+
+    closeCaptureSession(camera);
+    if (camera.nativeWindow) {
+        ANativeWindow_release(camera.nativeWindow);
+        camera.nativeWindow = nullptr;
     }
 }
